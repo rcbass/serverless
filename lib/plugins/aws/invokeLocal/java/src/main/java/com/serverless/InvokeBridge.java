@@ -1,5 +1,6 @@
 package com.serverless;
 
+import com.amazonaws.services.lambda.runtime.RequestStreamHandler;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -7,8 +8,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.beans.Introspector;
 import java.beans.PropertyDescriptor;
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.lang.reflect.Method;
 import java.net.URL;
@@ -16,24 +19,34 @@ import java.net.URLClassLoader;
 import java.util.HashMap;
 
 public class InvokeBridge {
-  private File artifact;
-  private String className;
-  private String handlerName;
+  private final File artifact;
+  private final String className;
+  private final String handlerName;
   private Object instance;
-  private Class clazz;
+  private Class<?> clazz;
+  private final ObjectMapper mapper;
 
   private InvokeBridge() {
     this.artifact = new File(new File("."), System.getProperty("artifactPath"));
     this.className = System.getProperty("className");
     this.handlerName = System.getProperty("handlerName");
+    this.mapper = new ObjectMapper();
 
     try {
       HashMap<String, Object> parsedInput = parseInput(getInput());
       HashMap<String, Object> eventMap = (HashMap<String, Object>) parsedInput.get("event");
+      Context context = getContext(parsedInput);
 
       this.instance = this.getInstance();
 
-      System.out.println(this.invoke(eventMap, this.getContext(parsedInput)).toString());
+      if (RequestStreamHandler.class.isAssignableFrom(this.clazz)) {
+        RequestStreamHandler handler = (RequestStreamHandler) instance;
+        InputStream input = new ByteArrayInputStream(mapper.writeValueAsBytes(eventMap));
+        handler.handleRequest(input, System.out, context);
+      } else {
+        System.out.println(this.invoke(eventMap, context));
+      }
+
     } catch (Exception e) {
       e.printStackTrace();
     }
@@ -61,7 +74,7 @@ public class InvokeBridge {
 
   private Object invoke(HashMap<String, Object> event, Context context) throws Exception {
     Method method = findHandlerMethod(this.clazz, this.handlerName);
-    Class requestClass = method.getParameterTypes()[0];
+    Class<?> requestClass = method.getParameterTypes()[0];
 
     Object request = event;
     if (!requestClass.isAssignableFrom(event.getClass())) {
@@ -85,7 +98,7 @@ public class InvokeBridge {
     }
   }
 
-  private Method findHandlerMethod(Class clazz, String handlerName) throws Exception {
+  private Method findHandlerMethod(Class<?> clazz, String handlerName) throws Exception {
     Method candidateMethod = null;
     for(Method method: clazz.getDeclaredMethods()) {
       if (method.getName().equals(handlerName) && !method.isBridge()) {
@@ -110,7 +123,6 @@ public class InvokeBridge {
 
   private HashMap<String, Object> parseInput(String input) throws IOException {
     TypeReference<HashMap<String,Object>> typeRef = new TypeReference<HashMap<String,Object>>() {};
-    ObjectMapper mapper = new ObjectMapper();
 
     JsonNode jsonNode = mapper.readTree(input);
 
